@@ -167,8 +167,8 @@ function t(key, ...args) {
 /* ---------- Storage / state ---------- */
 const STORE_KEY = 'morselink.v1';
 const defaults = () => ({
-  settings: { wpm: 15, freq: 620, volume: 0.7, sound: true, vibration: true, flash: true, theme: 'auto', lang: (navigator.language || 'de').startsWith('de') ? 'de' : 'en', altInput: false },
-  xp: 0, chars: {}, days: {}, daily: {}, dailyBest: null, bestStreak: 0, curStreak: 0, hearWpm: 0, fastest: 0, sumMs: 0, msN: 0
+  settings: { wpm: 15, freq: 620, volume: 0.7, sound: true, vibration: true, flash: true, theme: 'auto', lang: (navigator.language || 'de').startsWith('de') ? 'de' : 'en', altInput: false, dashMs: 200, farns: 0, inputMode: 'key' },
+  xp: 0, chars: {}, days: {}, daily: {}, dailyBest: null, bestStreak: 0, curStreak: 0, hearWpm: 0, badges: {}, fastest: 0, sumMs: 0, msN: 0
 });
 let S;
 try {
@@ -234,13 +234,15 @@ function record({ ch, ok, ms }) {
   } else S.curStreak = 0;
   const before = levelOf(S.xp);
   S.xp += gain; d.xp += gain;
-  if (levelOf(S.xp) > before) toast(t('levelup', levelOf(S.xp)));
+  if (levelOf(S.xp) > before) { toast(t('levelup', levelOf(S.xp))); celebrate(); }
+  checkBadges();
   save();
   return gain;
 }
 function addXP(n) {
   const before = levelOf(S.xp); S.xp += n; dayStats().xp += n;
-  if (levelOf(S.xp) > before) toast(t('levelup', levelOf(S.xp)));
+  if (levelOf(S.xp) > before) { toast(t('levelup', levelOf(S.xp))); celebrate(); }
+  checkBadges();
   save();
 }
 /* active-time tracking */
@@ -310,11 +312,13 @@ const Audio_ = (() => {
   }
   function timeline(code, wpm) {
     const u = 1200 / wpm, ev = []; let gap = 0, tok = -1;
+    let gl = 3 * u, gw = 7 * u; const f = S.settings.farns;
+    if (f > 0 && f < wpm) { const D = (60 * wpm - 37.2 * f) / (f * wpm) * 1000 / 19; gl = 3 * D; gw = 7 * D; }
     for (const tk of code.trim().split(/\s+/)) {
       if (!tk) continue;
       tok++;
-      if (tk === '/') { gap = 7 * u; continue; }
-      if (ev.length) ev.push({ on: false, ms: gap || 3 * u });
+      if (tk === '/') { gap = gw; continue; }
+      if (ev.length) ev.push({ on: false, ms: gap || gl });
       gap = 0;
       [...tk].forEach((sym, i) => {
         if (i) ev.push({ on: false, ms: u });
@@ -365,5 +369,32 @@ const Audio_ = (() => {
       }
     };
   }
-  return { ensure, startTone, stopTone, play };
+  function wav(code, wpm) {
+    const sr = 22050, ev = timeline(code, wpm || S.settings.wpm), f = S.settings.freq;
+    const n = Math.ceil((ev.reduce((a, e) => a + e.ms, 0) / 1000 + 0.3) * sr), pcm = new Int16Array(n);
+    let tt = 0.1;
+    for (const e of ev) {
+      if (e.on) {
+        const a = Math.floor(tt * sr), b = Math.floor((tt + e.ms / 1000) * sr);
+        for (let i = a; i < b && i < n; i++) pcm[i] = Math.sin(2 * Math.PI * f * i / sr) * Math.min(1, (i - a) / (0.006 * sr), (b - i) / (0.006 * sr)) * 0.6 * 32767;
+      }
+      tt += e.ms / 1000;
+    }
+    const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    const str = (o, x) => { for (let i = 0; i < x.length; i++) v.setUint8(o + i, x.charCodeAt(i)); };
+    str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVEfmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, n * 2, true);
+    pcm.forEach((x, i) => v.setInt16(44 + i * 2, x, true));
+    return new Blob([buf], { type: 'audio/wav' });
+  }
+  function chime() {
+    if (!S.settings.sound || !ensure()) return;
+    [523, 659, 784, 1047].forEach((fr, i) => {
+      const o = ctx.createOscillator(), g = ctx.createGain(), t0 = ctx.currentTime + i * 0.11;
+      o.frequency.value = fr; o.type = 'triangle';
+      g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(0.5, t0 + 0.02); g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.35);
+      o.connect(g); g.connect(master); o.start(t0); o.stop(t0 + 0.4);
+    });
+  }
+  return { ensure, startTone, stopTone, play, wav, chime };
 })();

@@ -54,3 +54,7 @@ function boot() {
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => { });
 }
 document.addEventListener('DOMContentLoaded', boot);
+
+/* block long-press context menu / selection outside text fields */
+document.addEventListener('contextmenu', e => { if (!e.target.closest('textarea, input')) e.preventDefault(); });
+document.addEventListener('selectstart', e => { if (!e.target.closest || !e.target.closest('textarea, input')) e.preventDefault(); });

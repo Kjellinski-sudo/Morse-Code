@@ -57,7 +57,7 @@ function openSheet(build) {
 function MorseKey({ size = 'lg', onSymbol, onCommit, onSpace, onChange } = {}) {
   let cur = '', downAt = 0, thrT = null, gapT = null, lastAct = 0, sawPointer = false;
   const unit = () => 1200 / S.settings.wpm;
-  const thr = () => Math.max(180, 2 * unit());
+  const thr = () => S.settings.dashMs;
   const gap = () => Math.max(700, 5 * unit());
   const ring = s('svg', { viewBox: '0 0 100 100', class: 'key-ring', 'aria-hidden': 'true' },
     s('circle', { class: 'ring-bg', cx: 50, cy: 50, r: 46 }), s('circle', { class: 'ring-fg', cx: 50, cy: 50, r: 46 }));
@@ -76,6 +76,28 @@ function MorseKey({ size = 'lg', onSymbol, onCommit, onSpace, onChange } = {}) {
     const code = cur; cur = ''; lastAct = performance.now();
     onChange && onChange('');
     onCommit && onCommit(code, REV[code] || null);
+  }
+  if (S.settings.inputMode === 'paddle') {
+    const stops = [];
+    const mkPad = sym => {
+      const b = h('button', { class: 'pad-key ' + (sym === '.' ? 'dot' : 'dash'), type: 'button', 'aria-label': sym === '.' ? t('dot') : t('dash') }, glyphs(sym, 'lg'));
+      let rep = null, saw = false;
+      const loop = () => { Audio_.play(sym, { haptic: false }); Haptics.tick(); inject(sym); rep = setTimeout(loop, (sym === '.' ? 2 : 4) * unit()); };
+      const stop = () => { clearTimeout(rep); rep = null; b.classList.remove('down'); };
+      stops.push(stop);
+      b.addEventListener('pointerdown', e => { e.preventDefault(); saw = true; try { b.setPointerCapture(e.pointerId); } catch (x) { /* ignore */ } Audio_.ensure(); b.classList.add('down'); if (!rep) loop(); });
+      b.addEventListener('pointerup', stop); b.addEventListener('pointercancel', stop);
+      b.addEventListener('contextmenu', e => e.preventDefault());
+      b.addEventListener('click', () => { if (!saw) inject(sym); saw = false; });
+      return b;
+    };
+    const el = h('div', { class: 'paddle size-' + size }, mkPad('.'), mkPad('-'));
+    return {
+      el, getCur: () => cur, inject, commit,
+      back() { if (!cur) return false; cur = cur.slice(0, -1); clearTimeout(gapT); onChange && onChange(cur); if (cur) gapT = setTimeout(commit, gap()); return true; },
+      reset() { clearTimeout(gapT); cur = ''; onChange && onChange(''); },
+      destroy() { clearTimeout(gapT); stops.forEach(f => f()); }
+    };
   }
   function down(e) {
     if (downAt) return;
@@ -197,7 +219,8 @@ function practiceKey(root) {
     h('section', { class: 'lcd card' },
       h('div', { class: 'lcd-top' }, h('span', { class: 'mono muted' }, 'TX'), stepper(), h('span', { class: 'mono muted' }, S.settings.freq + ' Hz')),
       h('div', { class: 'lcd-mid' }, codeEl, candEl), out),
-    h('div', { class: 'key-wrap' }, key.el, h('div', { class: 'muted small center' }, t('key.hint'))),
+    seg([['key', t('mode.key')], ['paddle', t('mode.paddle')]], S.settings.inputMode, v => { S.settings.inputMode = v; save(); render(); }, 'inline'),
+    h('div', { class: 'key-wrap' }, key.el, h('div', { class: 'muted small center' }, S.settings.inputMode === 'paddle' ? t('key.hint2') : t('key.hint'))),
     S.settings.altInput ? altButtons(key) : null,
     h('div', { class: 'btn-row' },
       h('button', { class: 'btn', type: 'button', onclick: () => { if (!key.back()) { text = text.slice(0, -1); refresh(''); } } }, '⌫ ' + t('key.back')),
@@ -246,7 +269,20 @@ function practiceT2M(root) {
         chip('💡 ' + t('light'), opt.light, e => { opt.light = !opt.light; e.currentTarget.classList.toggle('on', opt.light); e.currentTarget.setAttribute('aria-pressed', opt.light); }),
         chip('📳 ' + t('vib'), opt.vib, e => { opt.vib = !opt.vib; e.currentTarget.classList.toggle('on', opt.vib); e.currentTarget.setAttribute('aria-pressed', opt.vib); }))),
     h('div', { class: 'btn-row' }, playBtn,
-      h('button', { class: 'btn ghost', type: 'button', onclick: async () => { try { await navigator.clipboard.writeText(toks.map(x => x.code).join(' ')); toast(t('copied')); } catch (e) { /* ignore */ } } }, t('copy'))));
+      h('button', { class: 'btn ghost', type: 'button', onclick: async () => { try { await navigator.clipboard.writeText(toks.map(x => x.code).join(' ')); toast(t('copied')); } catch (e) { /* ignore */ } } }, t('copy'))),
+    h('div', { class: 'btn-row' },
+      h('button', { class: 'btn', type: 'button', onclick: () => {
+        if (!toks.length) return;
+        const txt = input.value.trim() + '\n' + toks.map(x => x.code).join(' ');
+        if (navigator.share) navigator.share({ text: txt }).catch(() => { });
+        else navigator.clipboard && navigator.clipboard.writeText(txt).then(() => toast(t('copied')));
+      } }, '↗ ' + t('share')),
+      h('button', { class: 'btn', type: 'button', onclick: () => {
+        if (!toks.length) return;
+        const blob = Audio_.wav(toks.map(x => x.code).join(' '), S.settings.wpm), file = new File([blob], 'morse.wav', { type: 'audio/wav' });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) navigator.share({ files: [file], text: input.value.trim() }).catch(() => { });
+        else { const a = h('a', { href: URL.createObjectURL(blob), download: 'morse.wav' }); document.body.append(a); a.click(); a.remove(); toast(t('saved')); }
+      } }, '♪ ' + t('share.audio'))));
   rebuild();
 }
 
@@ -280,7 +316,7 @@ function practiceM2T(root) {
 function quizSetup(root, preset) {
   const cfg = Object.assign({ mode: preset, pool: 'adaptive' }, nav.preset || {});
   if (nav.practice === 'hear') cfg.mode = 'hear';
-  const modes = [['m2l', 'q.m2l', 'q.m2l.d'], ['l2m', 'q.l2m', 'q.l2m.d'], ['hear', 'q.hear', 'q.hear.d']];
+  const modes = [['m2l', 'q.m2l', 'q.m2l.d'], ['l2m', 'q.l2m', 'q.l2m.d'], ['hear', 'q.hear', 'q.hear.d'], ['word', 'q.word', 'q.word.d']];
   const pools = ['adaptive', 'letters', 'digits', 'special', 'all'];
   function draw() {
     root.replaceChildren(
@@ -289,7 +325,7 @@ function quizSetup(root, preset) {
           type: 'button', class: 'mode' + (cfg.mode === id ? ' on' : ''), 'aria-pressed': cfg.mode === id ? 'true' : 'false',
           onclick: () => { cfg.mode = id; draw(); }
         }, h('b', {}, t(l)), h('small', { class: 'muted' }, t(d)))))),
-      h('section', { class: 'card' }, h('h3', {}, t('q.pool')),
+      cfg.mode === 'word' ? null : h('section', { class: 'card' }, h('h3', {}, t('q.pool')),
         h('div', { class: 'chips' }, pools.map(p => chip(t('pool.' + p), cfg.pool === p, () => { cfg.pool = p; draw(); }))),
         cfg.pool === 'adaptive' ? h('div', { class: 'muted small' }, t('q.adaptive.info', adaptivePool().join(' '))) : null),
       h('button', { class: 'btn primary wide big', type: 'button', onclick: () => { Audio_.ensure(); run(); } }, '▶ ' + t('q.start')));
@@ -319,7 +355,7 @@ function Quiz(root, cfg) {
   function updateHead() {
     bar.style.width = ((st.i - 1) / cfg.total * 100) + '%';
     info.textContent = t('q.of', st.i, cfg.total);
-    if (!cfg.daily) side.textContent = (st.streak ? '🔥' + st.streak : '') + (cfg.mode === 'hear' ? '  ' + st.wpm + ' ' + t('wpm') : '');
+    if (!cfg.daily) side.textContent = (st.streak ? '🔥' + st.streak : '') + (cfg.mode === 'hear' || cfg.mode === 'word' ? '  ' + st.wpm + ' ' + t('wpm') : '');
   }
   function choices(correct, n) {
     const pool = cfg.pool.length >= n ? cfg.pool : [...new Set([...cfg.pool, ...LETTERS, ...DIGITS])];
@@ -329,7 +365,14 @@ function Quiz(root, cfg) {
   function next() {
     if (st.i >= cfg.total) return finish();
     st.i++; st.locked = false;
-    const ch = cfg.seq ? cfg.seq[st.i - 1] : pickChar(cfg.pool, st.last, rand);
+    let ch;
+    if (cfg.mode === 'word') {
+      const list = WORDS[S.settings.lang] || WORDS.de;
+      do { ch = list[Math.floor(rand() * list.length)]; } while (ch === st.last);
+      st.last = ch; st.q = { ch, code: tokenize(ch).map(x => x.code).join(' '), t0: 0 };
+      updateHead(); return drawChoice();
+    }
+    ch = cfg.seq ? cfg.seq[st.i - 1] : pickChar(cfg.pool, st.last, rand);
     st.last = ch; st.q = { ch, code: MORSE[ch], t0: 0 };
     updateHead();
     if (cfg.mode === 'l2m') drawL2M(); else drawChoice();
@@ -339,25 +382,27 @@ function Quiz(root, cfg) {
     if (st.locked) return; st.locked = true;
     const ms = st.q.t0 ? performance.now() - st.q.t0 : 0;
     if (player) { player.stop(); player = null; }
-    st.xp += record({ ch: st.q.ch, ok, ms });
+    if (cfg.mode === 'word') { const d = dayStats(); d.n++; if (ok) d.ok++; const g = ok ? 15 : 0; addXP(g); st.xp += g; if (ok) { S.curStreak++; S.bestStreak = Math.max(S.bestStreak, S.curStreak); } else S.curStreak = 0; }
+    else st.xp += record({ ch: st.q.ch, ok, ms });
     if (ok) { st.ok++; st.streak++; st.best = Math.max(st.best, st.streak); if (ms) { st.msSum += ms; st.msN++; } } else st.streak = 0;
     if (cfg.mode === 'hear' && !cfg.daily) { st.wpm = ok ? (st.streak >= 3 ? Math.min(30, st.wpm + 1) : st.wpm) : Math.max(8, st.wpm - 1); S.hearWpm = st.wpm; save(); }
     ok ? Haptics.ok() : Haptics.bad();
     body.querySelectorAll('.choice').forEach(b => { b.disabled = true; if (b.dataset.c === st.q.ch) b.classList.add('ok'); });
     if (btnEl && !ok) btnEl.classList.add('bad');
     const fb = body.querySelector('.fb');
-    if (fb) { fb.className = 'fb show ' + (ok ? 'ok' : 'bad'); fb.replaceChildren(ok ? t('q.correct') : t('q.wrong') + ' ', ok ? '' : h('b', {}, st.q.ch), ' ', glyphs(st.q.code, 'sm')); }
+    if (fb) { fb.className = 'fb show ' + (ok ? 'ok' : 'bad'); fb.replaceChildren(ok ? t('q.correct') : t('q.wrong') + ' ', ok ? '' : h('b', {}, st.q.ch), ' ', cfg.mode === 'word' ? '' : glyphs(st.q.code, 'sm')); }
     body.classList.add(ok ? 'flash-ok' : 'flash-bad');
     updateHead();
     later(next, ok ? 750 : 1800);
   }
   function drawChoice() {
-    body.className = 'qbody'; const hear = cfg.mode === 'hear';
+    body.className = 'qbody'; const word = cfg.mode === 'word', hear = cfg.mode === 'hear' || word;
     const stage = hear
       ? h('div', { class: 'orb' }, h('div', { class: 'orb-core' }, '?'), h('div', { class: 'muted' }, t('q.listenq')))
       : h('div', { class: 'codeshow' }, glyphs(st.q.code, 'xl'), h('div', { class: 'muted small' }, t('q.listenq')));
-    const grid = h('div', { class: 'choices n' + (hear ? 6 : 4) }, choices(st.q.ch, hear ? 6 : 4).map(c =>
-      h('button', { class: 'choice', type: 'button', 'data-c': c, onclick: e => answer(c === st.q.ch, e.currentTarget) }, c)));
+    const opts = word ? shuffle([st.q.ch, ...shuffle((WORDS[S.settings.lang] || WORDS.de).filter(w => w !== st.q.ch), rand).slice(0, 3)], rand) : choices(st.q.ch, hear ? 6 : 4);
+    const grid = h('div', { class: 'choices n' + (word ? 'w' : hear ? 6 : 4) }, opts.map(c =>
+      h('button', { class: 'choice' + (word ? ' word' : ''), type: 'button', 'data-c': c, onclick: e => answer(c === st.q.ch, e.currentTarget) }, c)));
     const replay = h('button', { class: 'btn ghost', type: 'button', onclick: () => playQ() }, '↻ ' + t('q.replay'));
     body.replaceChildren(stage, grid, replay, fbBox());
     const orb = stage;
@@ -479,6 +524,8 @@ function charSheet(ch) {
         h('div', { class: 'stat' }, h('b', { class: 'mono' }, c.n), h('small', {}, t('l.attempts'))),
         h('div', { class: 'stat' }, h('b', { class: 'mono' }, c.n ? Math.round(c.ok / c.n * 100) + '%' : '–'), h('small', {}, t('l.acc'))),
         h('div', { class: 'stat' }, h('b', { class: 'mono' }, fmtMs(c.best)), h('small', {}, t('l.best')))),
+      MNEMO[ch] && S.settings.lang === 'de' ? h('div', { class: 'mnemo' }, h('small', { class: 'muted' }, '💡 ' + t('l.mnemo') + ' – ' + t('l.mnemo.d')),
+        h('div', { class: 'mnemo-w' }, MNEMO[ch].split('-').map(sy => h('span', { class: 'syl ' + (sy === sy.toUpperCase() ? 'dash' : 'dot') }, sy)))) : null,
       h('h3', {}, t('l.try')), h('div', { class: 'muted small' }, t('l.tryinfo') + ' ' + ch),
       codeEl, h('div', { class: 'key-wrap' }, key.el), S.settings.altInput ? altButtons(key) : null, msg);
   });
@@ -597,6 +644,9 @@ function viewStats(root) {
     chart(t('s.chart1'), d => d.n, maxN, 'c1', v => v),
     chart(t('s.chart2'), d => d.n ? d.ok / d.n * 100 : 0, 100, 'c2', v => Math.round(v) + '%'),
     chart(t('s.today') + ' (' + t('s.min') + ')', d => d.secs / 60, Math.max(5, ...days.map(d => d.secs / 60)), 'c3', v => v.toFixed(1)),
+    h('section', { class: 'card' }, h('h3', {}, t('s.badges') + ' · ' + Object.keys(S.badges).length + '/' + BADGES.length),
+      h('div', { class: 'badges' }, BADGES.map(b => h('div', { class: 'bdg' + (S.badges[b.id] ? ' on' : ''), title: b[S.settings.lang] },
+        h('span', { class: 'bdg-i' }, b.ico), h('small', {}, b[S.settings.lang]))))),
     h('section', { class: 'card' }, h('h3', {}, t('s.matrix')),
       h('div', { class: 'matrix' }, ALL.map(ch => {
         const c = S.chars[ch], acc = c && c.n ? c.ok / c.n : -1;
@@ -618,6 +668,9 @@ function viewSettings(root) {
   put(root, 
     h('section', { class: 'card' }, h('h3', {}, t('st.section.sig')),
       row(t('st.wpm'), slider('wpm', 5, 30, 1, v => v + ' ' + t('wpm'))),
+      row(t('st.dash'), slider('dashMs', 100, 500, 10, v => v + ' ms'), t('st.dash.d')),
+      row(t('st.farns'), slider('farns', 0, 25, 1, v => v ? v + ' ' + t('wpm') : t('off')), t('st.farns.d')),
+      row(t('st.input'), seg([['key', t('mode.key')], ['paddle', t('mode.paddle')]], S.settings.inputMode, v => { set('inputMode', v); render(); }, 'inline')),
       row(t('st.freq'), slider('freq', 300, 1000, 10, v => v + ' Hz')),
       row(t('st.vol'), slider('volume', 0, 1, 0.05, v => Math.round(v * 100) + '%')),
       row(t('st.sound'), toggle('sound')),
